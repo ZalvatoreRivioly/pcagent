@@ -1,0 +1,15 @@
+# Build de PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Artefactos descargados
+artifact/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
