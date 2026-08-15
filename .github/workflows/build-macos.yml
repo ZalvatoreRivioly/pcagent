@@ -7,14 +7,7 @@ on:
 
 jobs:
   build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            arch: arm64
-            artifact: PCTaller-Diagnostics-macos-arm64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,20 +22,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller websockets psutil
 
-      - name: Compilar binario único (onefile)
-        run: |
-          pyinstaller --onefile --windowed --clean --noconfirm \
-            --name "PCTaller-Diagnostics" \
-            --hidden-import websockets \
-            --hidden-import psutil \
-            --hidden-import tkinter \
-            --hidden-import tkinter.scrolledtext \
-            agent_client_macos.py
+      - name: Compilar binario unico (onefile)
+        run: pyinstaller --onefile --windowed --clean --noconfirm --name "PCTaller-Diagnostics" --hidden-import websockets --hidden-import psutil --hidden-import tkinter --hidden-import tkinter.scrolledtext agent_client_macos.py
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            dist/PCTaller-Diagnostics
+          name: PCTaller-Diagnostics-macos-arm64
+          path: dist/PCTaller-Diagnostics
           if-no-files-found: error
