@@ -30,8 +30,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller websockets psutil
 
+      - name: Selftest (codigo fuente)
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python agent_client_macos.py --selftest
+
       - name: Compilar binario unico (onefile)
         run: pyinstaller --onefile --windowed --clean --noconfirm --name "PCTaller-Diagnostics" --hidden-import websockets --hidden-import psutil --hidden-import tkinter --hidden-import tkinter.scrolledtext agent_client_macos.py
+
+      - name: Selftest (binario compilado)
+        run: |
+          set +e
+          ./dist/PCTaller-Diagnostics --selftest 2>&1 | tee selftest_bin.log
+          echo "EXIT=${PIPESTATUS[0]}"
+          exit "${PIPESTATUS[0]}"
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4

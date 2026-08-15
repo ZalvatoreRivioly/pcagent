@@ -73,6 +73,10 @@ SHELL = "/bin/sh"
 
 MAX_OUTPUT = 100000
 
+# Modo autotest: python3 agent_client_macos.py --selftest
+# Corre los diagnósticos nativos + prueba WebSocket sin GUI y sin servidor externo.
+SELFTEST = "--selftest" in sys.argv
+
 
 # ---------------------------------------------------------------------------
 # LOGGING COLA (thread-safe para la GUI)
@@ -81,7 +85,11 @@ log_queue = queue.Queue()
 
 def log(msg):
     timestamp = datetime.now().strftime("%H:%M:%S")
-    log_queue.put(f"[{timestamp}] {msg}")
+    line = f"[{timestamp}] {msg}"
+    if SELFTEST:
+        print(line, flush=True)
+    else:
+        log_queue.put(line)
 
 
 # ---------------------------------------------------------------------------
@@ -196,12 +204,14 @@ class LogWindow:
             self.root.mainloop()
 
 
-window = LogWindow()
-gui_thread = threading.Thread(target=window.start, daemon=True)
-gui_thread.start()
-import time
-while window.root is None:
-    time.sleep(0.1)
+window = None
+if not SELFTEST:
+    window = LogWindow()
+    gui_thread = threading.Thread(target=window.start, daemon=True)
+    gui_thread.start()
+    import time
+    while window.root is None:
+        time.sleep(0.1)
 
 
 def gui_log(kind, msg):
@@ -211,6 +221,8 @@ def gui_log(kind, msg):
         "radar": " [RADAR]", "persist": "[PERSIST]",
     }
     log(f"{prefixes.get(kind, ' [i]')} {msg}")
+    if SELFTEST:
+        return
     if kind == "ok":
         window.update_status(f"✅ {msg[:80]}")
     elif kind == "error":
@@ -1079,9 +1091,116 @@ async def connect_and_serve():
 
 
 # ---------------------------------------------------------------------------
+# SELFTEST (headless) — prueba diagnósticos + WebSocket sin servidor externo
+# ---------------------------------------------------------------------------
+SELFTEST_DIAGS = [
+    ("system_health", "df, sysctl, vm_stat, uptime, ps"),
+    ("hardware_info", "system_profiler"),
+    ("ports", "lsof, netstat"),
+    ("installed_software", "/Applications + brew"),
+    ("disk_detail", "diskutil"),
+    ("network_diagnostics", "networksetup, route, ping"),
+    ("malware_scan", "ps, codesign, lsof"),
+    ("radar_procesos", "ps, lsof"),
+    ("persistence_scan", "launchctl, osascript"),
+]
+
+
+async def _selftest_ws_roundtrip():
+    """Prueba handshake + ping + execute(get_info) contra un servidor local."""
+    import websockets
+    host, port = "127.0.0.1", 18791
+    received = {}
+
+    async def mock_handler(ws):
+        hs = json.loads(await ws.recv())
+        received["handshake"] = hs
+        await ws.send(json.dumps({"type": "ok", "msg": "welcome"}))
+        await ws.send(json.dumps({"type": "ping"}))
+        received["pong"] = json.loads(await ws.recv())
+        await ws.send(json.dumps({"type": "execute", "id": "st1", "command": "",
+                                 "command_type": "get_info", "params": {}}))
+        received["result"] = json.loads(await ws.recv())
+        await ws.close()
+
+    server = await websockets.serve(mock_handler, host, port)
+    try:
+        async with websockets.connect(f"ws://{host}:{port}") as ws:
+            await ws.send(json.dumps({"type": "handshake",
+                                      "name": f"{AGENT_NAME}@{AGENT_USER}",
+                                      "os": "macOS", "version": VERSION}))
+            await ws.recv()  # welcome
+            ping = json.loads(await ws.recv())
+            if ping.get("type") == "ping":
+                await ws.send(json.dumps({"type": "pong"}))
+            ex = json.loads(await ws.recv())
+            if ex.get("type") == "execute":
+                out = await handle_special_command(ex.get("command_type", "get_info"), ex.get("params", {}))
+                await ws.send(json.dumps({"type": "command_result", "id": ex.get("id"),
+                                          "status": "ok" if not out.startswith("ERROR") else "error",
+                                          "output": out[:500]}))
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    hs_ok = received.get("handshake", {}).get("name") == f"{AGENT_NAME}@{AGENT_USER}"
+    pong_ok = received.get("pong", {}).get("type") == "pong"
+    res_ok = received.get("result", {}).get("status") == "ok"
+    return hs_ok and pong_ok and res_ok
+
+
+async def run_selftest():
+    print("=" * 60)
+    print("  PCTaller Diagnostics — SELFTEST (macOS)")
+    print(f"  Host: {AGENT_NAME} | User: {AGENT_USER} | {VERSION}")
+    print("=" * 60)
+
+    results = []
+    for name, desc in SELFTEST_DIAGS:
+        script = MAC_COMMANDS.get(name, "")
+        if not script:
+            print(f"\n[SKIP] {name} (no script)")
+            continue
+        print(f"\n[RUN ] {name} ({desc})")
+        out = await run_sh(script, timeout=90)
+        ok = not out.startswith("ERROR")
+        print(f"[{('PASS' if ok else 'FAIL')}] {name} — {len(out)} chars")
+        if not ok:
+            print("  " + out[:400])
+        results.append((name, ok))
+
+    print("\n" + "=" * 60)
+    print("  TEST WEBSOCKET (handshake + ping + execute)")
+    print("=" * 60)
+    ws_ok = False
+    try:
+        ws_ok = await _selftest_ws_roundtrip()
+        print(f"[{'PASS' if ws_ok else 'FAIL'}] websocket_roundtrip")
+    except Exception as e:
+        print(f"[FAIL] websocket_roundtrip: {e}")
+    results.append(("websocket_roundtrip", ws_ok))
+
+    passed = sum(1 for _, ok in results if ok)
+    total = len(results)
+    print("\n" + "=" * 60)
+    print(f"  RESULTADO: {passed}/{total} PASS")
+    for name, ok in results:
+        print(f"    [{'PASS' if ok else 'FAIL'}] {name}")
+    print("=" * 60)
+    return 0 if passed == total else 1
+
+
+# ---------------------------------------------------------------------------
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 def main():
+    if SELFTEST:
+        try:
+            rc = asyncio.run(run_selftest())
+        except Exception as e:
+            print(f"SELFTEST FATAL: {e}")
+            rc = 1
+        sys.exit(rc)
     gui_log("info", "=" * 55)
     gui_log("info", "🚀 PCTaller Diagnostics Agent v2.0 (macOS)")
     gui_log("info", f"   Hostname: {AGENT_NAME}")
